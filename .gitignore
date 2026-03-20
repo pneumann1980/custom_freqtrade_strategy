@@ -1,0 +1,33 @@
+# Freqtrade Daten und Logs
+user_data/data/
+user_data/logs/
+user_data/backtest_results/
+user_data/hyperopts/
+user_data/plot/
+
+# API-Keys niemals eincommiten!
+# Wenn du API-Keys in der Config hast, diese Zeile einkommentieren:
+# config_okx_futures.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+env/
+venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Docker
+*.log
