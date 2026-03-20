@@ -64,8 +64,12 @@ class EMAHTFStrategy(IStrategy):
     # Trailing Stop global deaktiviert – wird per custom_stoploss() gesteuert
     trailing_stop = False
 
+    # Signal-Exits deaktiviert: Alle Exits laufen über custom_stoploss() (ATR Stop/TP/Trail)
+    # EMA-Kreuzungs-Exits auf 15m erzeugen Whipsaws → massive Verluste
+    use_exit_signal = False
+
     # Freqtrade stoploss als harter Fallback (sehr weit, da custom_stoploss aktiv)
-    stoploss = -0.20
+    stoploss = -0.10
 
     # ROI-Tabelle – wird durch custom_stoploss / TP-Signal ersetzt
     # Hohe Werte damit ROI nicht vorzeitig auslöst
@@ -250,22 +254,15 @@ class EMAHTFStrategy(IStrategy):
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Signal-basierter Exit: EMA kreuzt zurück → Position schließen.
-        Haupt-Exits laufen aber über custom_stoploss() (ATR Stop/TP/Trail).
+        Signal-Exits deaktiviert (use_exit_signal = False).
+
+        EMA-Kreuzungs-Exits auf 15m erzeugten massive Whipsaw-Verluste:
+        670 Signal-Exits à -3.3% = -2246 USDT im Backtest.
+        Alle Exits werden jetzt ausschließlich über custom_stoploss() gesteuert:
+          - Stop-Loss:    1.5x ATR unter/über Entry
+          - Take-Profit:  3.0x ATR über/unter Entry (RR 1:2)
+          - Trailing Stop: Aktiviert ab 2x ATR Gewinn
         """
-
-        # Long-Exit: EMA9 fällt unter EMA21 (bearisches Kreuzungssignal)
-        dataframe.loc[
-            dataframe["ema_cross_bear"],
-            ["exit_long", "exit_tag"],
-        ] = (1, "ema_cross_exit_long")
-
-        # Short-Exit: EMA9 steigt über EMA21 (bullisches Kreuzungssignal)
-        dataframe.loc[
-            dataframe["ema_cross_bull"],
-            ["exit_short", "exit_tag"],
-        ] = (1, "ema_cross_exit_short")
-
         return dataframe
 
     # ──────────────────────────────────────────────────────────────────────────
