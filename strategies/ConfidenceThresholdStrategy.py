@@ -48,7 +48,7 @@ class ConfidenceThresholdStrategy(IStrategy):
 
     # Wide ROI – custom TP in custom_exit takes over
     minimal_roi = {"0": 0.15}
-    stoploss = -0.05           # Hard fallback
+    stoploss = -0.20           # Hard fallback (20% stake – wider than ATR custom stop)
     trailing_stop = False
 
     process_only_new_candles = True
@@ -105,7 +105,7 @@ class ConfidenceThresholdStrategy(IStrategy):
     PREDICTION_HORIZON_MIN = 600    # Paper: 600-min prediction horizon
     CANDLE_TF_MIN = 15
     LEV_MIN = 2
-    LEV_MAX = 20
+    LEV_MAX = 10
     RISK_PER_TRADE = 0.01
     MAX_OPEN_POSITIONS = 2
     NO_TRADE_HOURS = {0, 1}         # 00:00–02:00 UTC
@@ -402,11 +402,16 @@ class ConfidenceThresholdStrategy(IStrategy):
             return self.stoploss
 
         atr_pct = atr / entry
-        sl_distance = atr_pct * float(self.atr_stop_mult.value)
+        leverage = trade.leverage
+
+        # ATR-based stop — multiply by leverage because current_profit in
+        # futures is (price_change / open_rate) * leverage
+        sl_distance = atr_pct * float(self.atr_stop_mult.value) * leverage
 
         # Break-even after 1x ATR profit
-        if current_profit >= atr_pct:
-            return stoploss_from_open(0.001, current_profit, is_short=trade.is_short)
+        if current_profit >= atr_pct * leverage:
+            return stoploss_from_open(0.001, current_profit, is_short=trade.is_short,
+                                      leverage=leverage)
 
         return -sl_distance
 
@@ -431,7 +436,7 @@ class ConfidenceThresholdStrategy(IStrategy):
             return None
 
         atr_pct = atr / entry
-        tp_pct = atr_pct * float(self.atr_tp_mult.value)
+        tp_pct = atr_pct * float(self.atr_tp_mult.value) * trade.leverage
 
         # Full take-profit
         if current_profit >= tp_pct:
@@ -475,7 +480,7 @@ class ConfidenceThresholdStrategy(IStrategy):
             return None
 
         atr_pct = atr / entry
-        half_tp_pct = atr_pct * float(self.atr_tp_mult.value) * 0.5
+        half_tp_pct = atr_pct * float(self.atr_tp_mult.value) * 0.5 * trade.leverage
         theta = float(self._calibrated_theta)
         confidence = last["confidence"]
 
@@ -561,15 +566,16 @@ class ConfidenceThresholdStrategy(IStrategy):
         if stop_dist <= 0 or price <= 0:
             return proposed_stake
 
-        position_usd = (risk_amount / stop_dist) * price
-        position_usd = min(position_usd, wallet * leverage)
+        # Formula: stake = risk_amount / (stop_pct * leverage)
+        stop_pct = stop_dist / price
+        stake = risk_amount / (stop_pct * leverage)
 
-        if min_stake and position_usd < min_stake:
-            position_usd = min_stake
-        if position_usd > max_stake:
-            position_usd = max_stake
+        if min_stake and stake < min_stake:
+            stake = min_stake
+        if stake > max_stake:
+            stake = max_stake
 
-        return position_usd
+        return stake
 
     # ================================================================
     #  SCHICHT 4: WALK-FORWARD θ KALIBRIERUNG

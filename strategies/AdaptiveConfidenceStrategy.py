@@ -56,7 +56,7 @@ class AdaptiveConfidenceStrategy(IStrategy):
     # ── Freqtrade ROI / Stoploss (overridden by custom logic) ──
     # Set wide ROI so custom stoploss/TP takes over
     minimal_roi = {"0": 0.10}
-    stoploss = -0.05  # Hard fallback stoploss (5%)
+    stoploss = -0.20  # Hard fallback stoploss (20% stake – wider than ATR custom stop)
     trailing_stop = False  # Managed manually in custom_stoploss
 
     # ── Process-only-new-candles ────────────────────────────
@@ -109,7 +109,7 @@ class AdaptiveConfidenceStrategy(IStrategy):
     base_risk_pct = DecimalParameter(0.005, 0.03, default=0.01, decimals=3, space="buy", optimize=False)
 
     # ── Constants ───────────────────────────────────────────
-    MAX_LEVERAGE = 20
+    MAX_LEVERAGE = 10
     MIN_LEVERAGE = 2
     MAX_OPEN_POSITIONS = 2
     NO_TRADE_HOURS = {0, 1}  # 00:00–02:00 UTC (low liquidity)
@@ -375,17 +375,18 @@ class AdaptiveConfidenceStrategy(IStrategy):
         atr = last["atr"]
         entry_price = trade.open_rate
         atr_pct = atr / entry_price if entry_price > 0 else 0.015
+        leverage = trade.leverage
 
-        # ATR-based initial stop
-        sl_distance = atr * self.atr_stop_mult.value / entry_price
+        # ATR-based initial stop — multiply by leverage because current_profit
+        # in futures is (price_change / open_rate) * leverage
+        sl_distance = atr_pct * float(self.atr_stop_mult.value) * leverage
 
         # After +1.5x ATR profit → move SL to break-even
-        be_trigger = atr_pct * 1.5
+        be_trigger = atr_pct * 1.5 * leverage
         if current_profit >= be_trigger:
-            # Return 0.0 → stop at break-even (no loss)
-            return stoploss_from_open(0.0, current_profit, is_short=trade.is_short)
+            return stoploss_from_open(0.0, current_profit, is_short=trade.is_short,
+                                      leverage=leverage)
 
-        # Return negative value (freqtrade expects negative stoploss)
         return -sl_distance
 
     # ── Custom exit (ATR take-profit) ───────────────────────
@@ -406,13 +407,10 @@ class AdaptiveConfidenceStrategy(IStrategy):
         atr = last["atr"]
         entry_price = trade.open_rate
         atr_pct = atr / entry_price if entry_price > 0 else 0.015
-
-        tp_pct = atr_pct * self.atr_tp_mult.value
+        tp_pct = atr_pct * self.atr_tp_mult.value * trade.leverage
 
         # Full TP reached
-        if not trade.is_short and current_profit >= tp_pct:
-            return "atr_take_profit"
-        if trade.is_short and current_profit >= tp_pct:
+        if current_profit >= tp_pct:
             return "atr_take_profit"
 
         # Regime change → close
@@ -449,7 +447,7 @@ class AdaptiveConfidenceStrategy(IStrategy):
         atr = last["atr"]
         entry_price = trade.open_rate
         atr_pct = atr / entry_price if entry_price > 0 else 0.015
-        half_tp_pct = atr_pct * self.atr_tp_mult.value * 0.5
+        half_tp_pct = atr_pct * self.atr_tp_mult.value * 0.5 * trade.leverage
 
         # Partial close at 50% of TP – only once
         if (
@@ -508,14 +506,15 @@ class AdaptiveConfidenceStrategy(IStrategy):
         if stop_dist <= 0 or price <= 0:
             return proposed_stake
 
-        position_usd = (risk_amount / stop_dist) * price
-        max_position = wallet * leverage
-        position_usd = min(position_usd, max_position)
+        # Formula: stake = risk_amount / (stop_pct * leverage)
+        # risk_amount / stop_dist * price gives the notional value;
+        # dividing by leverage converts to stake (margin).
+        stop_pct = stop_dist / price
+        stake = risk_amount / (stop_pct * leverage)
 
-        # Clamp to freqtrade limits
-        if min_stake and position_usd < min_stake:
-            position_usd = min_stake
-        if position_usd > max_stake:
-            position_usd = max_stake
+        if min_stake and stake < min_stake:
+            stake = min_stake
+        if stake > max_stake:
+            stake = max_stake
 
-        return position_usd
+        return stake
