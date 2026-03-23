@@ -335,7 +335,8 @@ class ConfidenceThresholdStrategy(IStrategy):
         dataframe["enter_short"] = 0
         dataframe["enter_tag"] = ""
 
-        theta = float(self._calibrated_theta)
+        # Use hyperopt-tunable theta (calibration updates this via bot_start in live)
+        theta = float(self.theta_execute.value)
         adx_min = self.adx_min_entry.value
         vol_min = float(self.vol_confirm_ratio.value)
 
@@ -498,16 +499,9 @@ class ConfidenceThresholdStrategy(IStrategy):
 
         atr_pct = atr / entry
         half_tp_pct = atr_pct * float(self.atr_tp_mult.value) * 0.5 * trade.leverage
-        theta = float(self._calibrated_theta)
-        confidence = last["confidence"]
-
         # 50% partial close at half-TP target (only once)
         if current_profit >= half_tp_pct and trade.nr_of_successful_exits == 0:
             return -(trade.stake_amount / 2.0)
-
-        # 30% reduction on confidence drop (before any partial close)
-        if confidence < theta and trade.nr_of_successful_exits == 0:
-            return -(trade.stake_amount * 0.30)
 
         return None
 
@@ -622,7 +616,11 @@ class ConfidenceThresholdStrategy(IStrategy):
             calibrated = self._calibrate_theta(df_calc, window=500)
             if calibrated is not None:
                 self._calibrated_theta = calibrated
-                self.theta_execute._value = calibrated  # sync hyperopt param
+                # Sync to hyperopt param so populate_entry_trend picks it up in live
+                try:
+                    self.theta_execute._value = calibrated
+                except Exception:
+                    pass
                 print(
                     f"[ConfidenceThreshold] Walk-forward calibration: "
                     f"θ = {calibrated:.2f}"
