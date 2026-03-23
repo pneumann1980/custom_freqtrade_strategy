@@ -89,30 +89,6 @@
   "dataformat_ohlcv": "json",
   "dataformat_trades": "jsongz",
 
-  "protections": [
-    {
-      "method": "StoplossGuard",
-      "lookback_period_candles": 48,
-      "trade_limit": 3,
-      "stop_duration_candles": 4,
-      "only_per_pair": false
-    },
-    {
-      "method": "MaxDrawdown",
-      "lookback_period_candles": 96,
-      "trade_limit": 1,
-      "stop_duration_candles": 4,
-      "max_allowed_drawdown": 0.15
-    },
-    {
-      "method": "LowProfitPairs",
-      "lookback_period_candles": 96,
-      "trade_limit": 2,
-      "stop_duration_candles": 24,
-      "required_profit": 0.0
-    }
-  ],
-
   "hyperopt": {
     "loss": "SharpeHyperOptLoss",
     "spaces": ["buy", "sell"],
