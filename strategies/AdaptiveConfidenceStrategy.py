@@ -103,10 +103,14 @@ class AdaptiveConfidenceStrategy(IStrategy):
     ema_slow = IntParameter(40, 60, default=50, space="buy", optimize=False)
     volume_ma = IntParameter(15, 30, default=20, space="buy", optimize=False)
 
-    min_confidence = IntParameter(40, 60, default=45, space="buy", optimize=True)
+    min_confidence = IntParameter(55, 85, default=65, space="buy", optimize=True)
     atr_stop_mult = DecimalParameter(1.0, 2.5, default=1.5, decimals=1, space="sell", optimize=True)
     atr_tp_mult = DecimalParameter(2.0, 5.0, default=3.0, decimals=1, space="sell", optimize=True)
     base_risk_pct = DecimalParameter(0.005, 0.03, default=0.01, decimals=3, space="buy", optimize=False)
+
+    # ── Hard confluence filters (hyperopt-tunable) ──────────
+    adx_min_15m = IntParameter(20, 35, default=25, space="buy", optimize=True)
+    vol_confirm_ratio = DecimalParameter(1.1, 2.0, default=1.3, decimals=1, space="buy", optimize=True)
 
     # ── Constants ───────────────────────────────────────────
     MAX_LEVERAGE = 10
@@ -153,6 +157,24 @@ class AdaptiveConfidenceStrategy(IStrategy):
         dataframe["macd_hist_prev"] = dataframe["macd_hist"].shift(1)
         dataframe["macd_prev"] = dataframe["macd"].shift(1)
         dataframe["macd_signal_prev"] = dataframe["macd_signal"].shift(1)
+
+        # ── Confluence confirmation indicators ─────────────
+        # MACD histogram confirmed momentum: positive/negative for 2 consecutive candles
+        dataframe["macd_bull_conf"] = (
+            (dataframe["macd_hist"] > 0) & (dataframe["macd_hist_prev"] > 0)
+        )
+        dataframe["macd_bear_conf"] = (
+            (dataframe["macd_hist"] < 0) & (dataframe["macd_hist_prev"] < 0)
+        )
+
+        # Price position relative to slow EMA (trend alignment on 15m)
+        dataframe["price_above_ema_slow"] = dataframe["close"] > dataframe["ema_slow"]
+        dataframe["price_below_ema_slow"] = dataframe["close"] < dataframe["ema_slow"]
+
+        # EMA slope: fast EMA rising/falling over last 3 candles
+        dataframe["ema_fast_slope"] = dataframe["ema_fast"] - dataframe["ema_fast"].shift(3)
+        dataframe["ema_rising"] = dataframe["ema_fast_slope"] > 0
+        dataframe["ema_falling"] = dataframe["ema_fast_slope"] < 0
 
         # ── 1h informative indicators (market regime) ─────
         informative = self.dp.get_pair_dataframe(
@@ -305,11 +327,25 @@ class AdaptiveConfidenceStrategy(IStrategy):
         dataframe["enter_tag"] = ""
 
         min_conf = self.min_confidence.value
+        adx_min = self.adx_min_15m.value
+        vol_min = self.vol_confirm_ratio.value
 
-        # LONG conditions
+        # LONG conditions — full confluence required:
+        # 1. 1h trend: above EMA200, ADX > 25 (via regime)
+        # 2. 15m trend: ADX strong, price above slow EMA, EMA rising
+        # 3. Momentum: MACD hist positive 2+ candles
+        # 4. RSI: momentum zone (not overbought)
+        # 5. Volume: above average (institutional confirmation)
         long_conditions = [
             dataframe["regime_1h"] == "TRENDING_BULL",
             dataframe["confidence_long"] >= min_conf,
+            dataframe["adx"] >= adx_min,
+            dataframe["price_above_ema_slow"],
+            dataframe["ema_rising"],
+            dataframe["macd_bull_conf"],
+            dataframe["rsi"] > 50,
+            dataframe["rsi"] < 75,
+            dataframe["vol_ratio"] >= vol_min,
             dataframe["volume"] > 0,
         ]
         dataframe.loc[reduce(lambda a, b: a & b, long_conditions), "enter_long"] = 1
@@ -318,10 +354,17 @@ class AdaptiveConfidenceStrategy(IStrategy):
             "enter_tag",
         ] = "conf_" + dataframe["confidence_long"].astype(str)
 
-        # SHORT conditions
+        # SHORT conditions — mirror confluence:
         short_conditions = [
             dataframe["regime_1h"] == "TRENDING_BEAR",
             dataframe["confidence_short"] >= min_conf,
+            dataframe["adx"] >= adx_min,
+            dataframe["price_below_ema_slow"],
+            dataframe["ema_falling"],
+            dataframe["macd_bear_conf"],
+            dataframe["rsi"] < 50,
+            dataframe["rsi"] > 25,
+            dataframe["vol_ratio"] >= vol_min,
             dataframe["volume"] > 0,
         ]
         dataframe.loc[reduce(lambda a, b: a & b, short_conditions), "enter_short"] = 1

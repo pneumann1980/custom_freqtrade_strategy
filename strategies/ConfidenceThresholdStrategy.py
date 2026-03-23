@@ -101,6 +101,11 @@ class ConfidenceThresholdStrategy(IStrategy):
     # ── Deadband ────────────────────────────────────────────────
     deadband_bps = IntParameter(5, 20, default=10, space="buy", optimize=False)
 
+    # ── Hard confluence filters ──────────────────────────────────
+    adx_min_entry = IntParameter(15, 35, default=22, space="buy", optimize=True)
+    vol_confirm_ratio = DecimalParameter(1.05, 1.60, default=1.15, decimals=2,
+                                         space="buy", optimize=True)
+
     # ── Constants ───────────────────────────────────────────────
     PREDICTION_HORIZON_MIN = 600    # Paper: 600-min prediction horizon
     CANDLE_TF_MIN = 15
@@ -331,11 +336,20 @@ class ConfidenceThresholdStrategy(IStrategy):
         dataframe["enter_tag"] = ""
 
         theta = float(self._calibrated_theta)
+        adx_min = self.adx_min_entry.value
+        vol_min = float(self.vol_confirm_ratio.value)
 
-        # ── Long: UP signal above θ ──────────────────────────────
+        # ── Long: UP signal above θ + hard confluence ────────────
+        # 1. Classifier: UP direction with confidence >= θ
+        # 2. Trend: price above EMA_200 (long-term bull structure)
+        # 3. Momentum: ADX trending market (not ranging)
+        # 4. Volume: above average (institutional participation)
         long_cond = (
             (dataframe["signal_direction"] == "UP")
             & (dataframe["confidence"] >= theta)
+            & (dataframe["close"] > dataframe["ema_200"])
+            & (dataframe["adx"] >= adx_min)
+            & (dataframe["volume_ratio"] >= vol_min)
             & (~dataframe["date"].dt.hour.isin(self.NO_TRADE_HOURS))
             & (dataframe["volume"] > 0)
         )
@@ -344,10 +358,13 @@ class ConfidenceThresholdStrategy(IStrategy):
             "conf_" + (dataframe["confidence"] * 100).round(0).astype(int).astype(str)
         )
 
-        # ── Short: DOWN signal above θ ───────────────────────────
+        # ── Short: DOWN signal above θ + hard confluence ─────────
         short_cond = (
             (dataframe["signal_direction"] == "DOWN")
             & (dataframe["confidence"] >= theta)
+            & (dataframe["close"] < dataframe["ema_200"])
+            & (dataframe["adx"] >= adx_min)
+            & (dataframe["volume_ratio"] >= vol_min)
             & (~dataframe["date"].dt.hour.isin(self.NO_TRADE_HOURS))
             & (dataframe["volume"] > 0)
         )
