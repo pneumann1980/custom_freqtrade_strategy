@@ -46,9 +46,9 @@ class ConfidenceThresholdStrategy(IStrategy):
     use_custom_stoploss = True
     position_adjustment_enable = True
 
-    # Wide ROI – custom TP in custom_exit takes over
-    minimal_roi = {"0": 0.15}
-    stoploss = -0.20           # Hard fallback (20% stake – wider than ATR custom stop)
+    # Very wide ROI – only emergency exit; real TP managed by custom_exit (ATR-based)
+    minimal_roi = {"0": 100}
+    stoploss = -0.35           # Hard fallback – must be wider than atr_pct*1.5*max_leverage
     trailing_stop = False
 
     process_only_new_candles = True

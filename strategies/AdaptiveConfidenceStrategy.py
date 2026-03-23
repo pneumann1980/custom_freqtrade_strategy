@@ -55,8 +55,8 @@ class AdaptiveConfidenceStrategy(IStrategy):
 
     # ── Freqtrade ROI / Stoploss (overridden by custom logic) ──
     # Set wide ROI so custom stoploss/TP takes over
-    minimal_roi = {"0": 0.10}
-    stoploss = -0.20  # Hard fallback stoploss (20% stake – wider than ATR custom stop)
+    minimal_roi = {"0": 100}
+    stoploss = -0.35  # Hard fallback – must be wider than atr_pct*1.5*max_leverage
     trailing_stop = False  # Managed manually in custom_stoploss
 
     # ── Process-only-new-candles ────────────────────────────
