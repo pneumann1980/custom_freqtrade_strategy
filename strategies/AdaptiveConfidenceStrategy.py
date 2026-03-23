@@ -103,14 +103,14 @@ class AdaptiveConfidenceStrategy(IStrategy):
     ema_slow = IntParameter(40, 60, default=50, space="buy", optimize=False)
     volume_ma = IntParameter(15, 30, default=20, space="buy", optimize=False)
 
-    min_confidence = IntParameter(55, 85, default=65, space="buy", optimize=True)
+    min_confidence = IntParameter(40, 75, default=50, space="buy", optimize=True)
     atr_stop_mult = DecimalParameter(1.0, 2.5, default=1.5, decimals=1, space="sell", optimize=True)
     atr_tp_mult = DecimalParameter(2.0, 5.0, default=3.0, decimals=1, space="sell", optimize=True)
     base_risk_pct = DecimalParameter(0.005, 0.03, default=0.01, decimals=3, space="buy", optimize=False)
 
     # ── Hard confluence filters (hyperopt-tunable) ──────────
-    adx_min_15m = IntParameter(20, 35, default=25, space="buy", optimize=True)
-    vol_confirm_ratio = DecimalParameter(1.1, 2.0, default=1.3, decimals=1, space="buy", optimize=True)
+    adx_min_15m = IntParameter(15, 30, default=20, space="buy", optimize=True)
+    vol_confirm_ratio = DecimalParameter(1.1, 2.0, default=1.2, decimals=1, space="buy", optimize=True)
 
     # ── Constants ───────────────────────────────────────────
     MAX_LEVERAGE = 10
@@ -244,20 +244,25 @@ class AdaptiveConfidenceStrategy(IStrategy):
                 score += 10
 
         # B) RSI (0–25 Punkte)
+        # Score pullback-recovery zone, not overbought momentum
         if direction == "LONG":
-            if 50 < rsi < 65:
+            if 42 <= rsi <= 58:             # Pullback recovery or early momentum
                 score += 15
-            if rsi > 40 and rsi_prev < 40:  # RSI crosses 40 upward
+            if rsi > 40 and rsi_prev < 40:  # Fresh recovery from oversold
                 score += 10
             if rsi < 35:
                 score -= 5
+            if rsi > 70:                    # Penalise overbought entries
+                score -= 10
         else:  # SHORT
-            if 35 < rsi < 50:
+            if 42 <= rsi <= 58:             # Pullback bounce or early weakness
                 score += 15
-            if rsi < 60 and rsi_prev > 60:  # RSI crosses 60 downward
+            if rsi < 60 and rsi_prev > 60:  # Fresh rejection from overbought
                 score += 10
             if rsi > 65:
                 score -= 5
+            if rsi < 30:                    # Penalise oversold entries
+                score -= 10
 
         # C) EMA Trend Alignment (0–20 Punkte)
         if direction == "LONG" and ema_fast > ema_slow:
@@ -330,21 +335,19 @@ class AdaptiveConfidenceStrategy(IStrategy):
         adx_min = self.adx_min_15m.value
         vol_min = self.vol_confirm_ratio.value
 
-        # LONG conditions — full confluence required:
-        # 1. 1h trend: above EMA200, ADX > 25 (via regime)
-        # 2. 15m trend: ADX strong, price above slow EMA, EMA rising
-        # 3. Momentum: MACD hist positive 2+ candles
-        # 4. RSI: momentum zone (not overbought)
-        # 5. Volume: above average (institutional confirmation)
+        # LONG conditions — pullback-entry approach:
+        # Enter when 1h trend is bullish AND 15m has pulled back and is recovering.
+        # RSI < 60 + rising: price has cooled down, now turning up → NOT at the top.
+        # MACD hist rising: momentum is improving, not already extended.
+        # This avoids the "entry at local peak" failure mode of pure momentum signals.
         long_conditions = [
             dataframe["regime_1h"] == "TRENDING_BULL",
             dataframe["confidence_long"] >= min_conf,
             dataframe["adx"] >= adx_min,
-            dataframe["price_above_ema_slow"],
-            dataframe["ema_rising"],
-            dataframe["macd_bull_conf"],
-            dataframe["rsi"] > 50,
-            dataframe["rsi"] < 75,
+            dataframe["close"] > dataframe["ema_slow"],          # Price in uptrend on 15m
+            dataframe["macd_hist"] > dataframe["macd_hist_prev"], # MACD momentum improving
+            dataframe["rsi"] < 60,                               # Not overbought
+            dataframe["rsi"] > dataframe["rsi_prev"],            # RSI recovering from pullback
             dataframe["vol_ratio"] >= vol_min,
             dataframe["volume"] > 0,
         ]
@@ -354,16 +357,15 @@ class AdaptiveConfidenceStrategy(IStrategy):
             "enter_tag",
         ] = "conf_" + dataframe["confidence_long"].astype(str)
 
-        # SHORT conditions — mirror confluence:
+        # SHORT conditions — mirror pullback logic:
         short_conditions = [
             dataframe["regime_1h"] == "TRENDING_BEAR",
             dataframe["confidence_short"] >= min_conf,
             dataframe["adx"] >= adx_min,
-            dataframe["price_below_ema_slow"],
-            dataframe["ema_falling"],
-            dataframe["macd_bear_conf"],
-            dataframe["rsi"] < 50,
-            dataframe["rsi"] > 25,
+            dataframe["close"] < dataframe["ema_slow"],          # Price in downtrend on 15m
+            dataframe["macd_hist"] < dataframe["macd_hist_prev"], # MACD worsening
+            dataframe["rsi"] > 40,                               # Not oversold
+            dataframe["rsi"] < dataframe["rsi_prev"],            # RSI declining from bounce
             dataframe["vol_ratio"] >= vol_min,
             dataframe["volume"] > 0,
         ]

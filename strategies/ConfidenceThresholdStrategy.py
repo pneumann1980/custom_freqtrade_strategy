@@ -317,6 +317,11 @@ class ConfidenceThresholdStrategy(IStrategy):
         # Apply deadband mask (no signal = 0.5)
         dataframe["confidence"] = np.where(above_deadband, confidence, 0.5)
 
+        # ── Pullback-timing helpers ──────────────────────────────
+        # Used in populate_entry_trend to filter out overbought/oversold entries
+        dataframe["macd_hist_prev"] = dataframe["macd_hist"].shift(1)
+        dataframe["rsi_prev"] = dataframe["rsi_14"].shift(1)
+
         # Signal direction: UP (long), DOWN (short), NONE (no trade)
         dataframe["signal_direction"] = np.where(
             above_deadband,
@@ -340,17 +345,19 @@ class ConfidenceThresholdStrategy(IStrategy):
         adx_min = self.adx_min_entry.value
         vol_min = float(self.vol_confirm_ratio.value)
 
-        # ── Long: UP signal above θ + hard confluence ────────────
-        # 1. Classifier: UP direction with confidence >= θ
-        # 2. Trend: price above EMA_200 (long-term bull structure)
-        # 3. Momentum: ADX trending market (not ranging)
-        # 4. Volume: above average (institutional participation)
+        # ── Long: UP signal above θ + hard confluence + pullback timing ─
+        # Pullback timing: RSI < 58 and RISING means price pulled back from
+        # overbought levels and is now recovering — entering at a better price
+        # rather than at the peak of a momentum move.
         long_cond = (
             (dataframe["signal_direction"] == "UP")
             & (dataframe["confidence"] >= theta)
             & (dataframe["close"] > dataframe["ema_200"])
             & (dataframe["adx"] >= adx_min)
             & (dataframe["volume_ratio"] >= vol_min)
+            & (dataframe["rsi_14"] < 58)                              # Not overbought
+            & (dataframe["rsi_14"] > dataframe["rsi_prev"])           # RSI recovering
+            & (dataframe["macd_hist"] > dataframe["macd_hist_prev"])  # MACD improving
             & (~dataframe["date"].dt.hour.isin(self.NO_TRADE_HOURS))
             & (dataframe["volume"] > 0)
         )
@@ -359,13 +366,16 @@ class ConfidenceThresholdStrategy(IStrategy):
             "conf_" + (dataframe["confidence"] * 100).round(0).astype(int).astype(str)
         )
 
-        # ── Short: DOWN signal above θ + hard confluence ─────────
+        # ── Short: DOWN signal above θ + hard confluence + pullback timing ─
         short_cond = (
             (dataframe["signal_direction"] == "DOWN")
             & (dataframe["confidence"] >= theta)
             & (dataframe["close"] < dataframe["ema_200"])
             & (dataframe["adx"] >= adx_min)
             & (dataframe["volume_ratio"] >= vol_min)
+            & (dataframe["rsi_14"] > 42)                              # Not oversold
+            & (dataframe["rsi_14"] < dataframe["rsi_prev"])           # RSI declining
+            & (dataframe["macd_hist"] < dataframe["macd_hist_prev"])  # MACD worsening
             & (~dataframe["date"].dt.hour.isin(self.NO_TRADE_HOURS))
             & (dataframe["volume"] > 0)
         )
