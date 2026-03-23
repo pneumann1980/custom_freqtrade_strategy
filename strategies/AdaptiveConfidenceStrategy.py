@@ -65,6 +65,36 @@ class AdaptiveConfidenceStrategy(IStrategy):
     # ── Startup candles needed ──────────────────────────────
     startup_candle_count = 210  # EMA200 on 1h needs 200 candles
 
+    # ── Protections (active in live + backtest --enable-protections) ─
+    @property
+    def protections(self):
+        return [
+            {
+                # Stop trading after 3 consecutive stoploss hits in 12h
+                "method": "StoplossGuard",
+                "lookback_period_candles": 48,   # 48 × 15min = 12h
+                "trade_limit": 3,
+                "stop_duration_candles": 4,
+                "only_per_pair": False,
+            },
+            {
+                # Pause when drawdown exceeds 15% in 24h window
+                "method": "MaxDrawdown",
+                "lookback_period_candles": 96,   # 96 × 15min = 24h
+                "trade_limit": 1,
+                "stop_duration_candles": 4,
+                "max_allowed_drawdown": 0.15,
+            },
+            {
+                # Stop trading a pair that lost money in last 24h
+                "method": "LowProfitPairs",
+                "lookback_period_candles": 96,
+                "trade_limit": 2,
+                "stop_duration_candles": 24,
+                "required_profit": 0.0,
+            },
+        ]
+
     # ── Hyperopt-tunable parameters ────────────────────────
     rsi_period = IntParameter(10, 20, default=14, space="buy", optimize=False)
     adx_period = IntParameter(10, 20, default=14, space="buy", optimize=False)

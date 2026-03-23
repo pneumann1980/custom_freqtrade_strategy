@@ -89,13 +89,6 @@
   "dataformat_ohlcv": "json",
   "dataformat_trades": "jsongz",
 
-  "backtesting": {
-    "timeframe": "15m",
-    "timerange": "20230101-20241231",
-    "enable_protections": true,
-    "strategy_list": ["AdaptiveConfidenceStrategy"]
-  },
-
   "protections": [
     {
       "method": "StoplossGuard",
