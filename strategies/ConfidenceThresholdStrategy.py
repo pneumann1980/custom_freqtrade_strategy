@@ -532,7 +532,6 @@ class ConfidenceThresholdStrategy(IStrategy):
         self,
         current_time: datetime,
         current_rate: float,
-        current_profit: float,
         proposed_stake: float,
         min_stake: Optional[float],
         max_stake: float,
@@ -541,6 +540,7 @@ class ConfidenceThresholdStrategy(IStrategy):
         side: str,
         **kwargs,
     ) -> float:
+        current_profit = kwargs.get("current_profit", 0.0)
         pair = kwargs.get("pair", "")
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
         if dataframe.empty:

@@ -466,7 +466,6 @@ class AdaptiveConfidenceStrategy(IStrategy):
         self,
         current_time: datetime,
         current_rate: float,
-        current_profit: float,
         proposed_stake: float,
         min_stake: Optional[float],
         max_stake: float,
