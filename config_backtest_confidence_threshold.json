@@ -71,9 +71,6 @@
     "chat_id": ""
   },
 
-  "api_server": {
-    "enabled": false
-  },
 
   "bot_name": "ConfidenceThresholdBacktest",
   "strategy": "ConfidenceThresholdStrategy",
