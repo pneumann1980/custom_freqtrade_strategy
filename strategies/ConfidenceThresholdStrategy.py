@@ -3,7 +3,7 @@
 # isort: skip_file
 # --- Do not remove these imports ---
 from datetime import datetime
-from typing import Optional
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -46,8 +46,8 @@ class ConfidenceThresholdStrategy(IStrategy):
     use_custom_stoploss = True
     position_adjustment_enable = True
 
-    # Very wide ROI – only emergency exit; real TP managed by custom_exit (ATR-based)
-    minimal_roi = {"0": 100}
+    # Emergency exit only; real TP managed by custom_exit (ATR-based)
+    minimal_roi = {"0": 10.0}
     stoploss = -0.35           # Hard fallback – must be wider than atr_pct*1.5*max_leverage
     trailing_stop = False
 
@@ -109,14 +109,15 @@ class ConfidenceThresholdStrategy(IStrategy):
     # ── Constants ───────────────────────────────────────────────
     PREDICTION_HORIZON_MIN = 600    # Paper: 600-min prediction horizon
     CANDLE_TF_MIN = 15
+    CALIB_WINDOW = 500              # Candles used for walk-forward calibration
     LEV_MIN = 2
-    LEV_MAX = 10
+    LEV_MAX = 8
     RISK_PER_TRADE = 0.01
     MAX_OPEN_POSITIONS = 2
     NO_TRADE_HOURS = {0, 1}         # 00:00–02:00 UTC
 
-    # Walk-forward calibrated θ (updated in bot_start)
-    _calibrated_theta: float = 0.65
+    # Per-pair walk-forward calibrated θ (updated in bot_start)
+    _pair_theta: Dict[str, float] = {}
 
     # ── Feature weights (from paper feature-importance analysis) ─
     # Positive = bullish contribution, negative = bearish/noise
@@ -159,6 +160,7 @@ class ConfidenceThresholdStrategy(IStrategy):
         # ── Macro: EMAs & spreads ────────────────────────────────
         dataframe["ema_12"] = ta.EMA(dataframe, timeperiod=12)
         dataframe["ema_26"] = ta.EMA(dataframe, timeperiod=26)
+        dataframe["ema_50"] = ta.EMA(dataframe, timeperiod=50)
         dataframe["ema_200"] = ta.EMA(dataframe, timeperiod=200)
 
         # Spreads normalized by price → direction signal
@@ -312,10 +314,27 @@ class ConfidenceThresholdStrategy(IStrategy):
         # ADX bonus: clear trend → slight confidence boost
         adx_bonus = np.where(dataframe["adx"] > 30, 0.03, 0.0)
 
-        confidence = (raw_prob - vol_penalty + adx_bonus).clip(0.5, 1.0)
+        # Weak trend penalty: ADX < 18 = choppy/no trend → reduce confidence
+        weak_trend_penalty = np.where(dataframe["adx"] < 18, 0.05, 0.0)
+
+        confidence = (raw_prob - vol_penalty + adx_bonus - weak_trend_penalty).clip(0.5, 1.0)
 
         # Apply deadband mask (no signal = 0.5)
         dataframe["confidence"] = np.where(above_deadband, confidence, 0.5)
+
+        # ── Signal strength tier ─────────────────────────────────
+        theta_very_high = float(self.theta_very_high.value)
+        theta_high = float(self.theta_high.value)
+        theta_exec = float(self.theta_execute.value)
+        dataframe["signal_strength"] = np.select(
+            [
+                dataframe["confidence"] >= theta_very_high,
+                dataframe["confidence"] >= theta_high,
+                dataframe["confidence"] >= theta_exec,
+            ],
+            ["VERY_HIGH", "HIGH", "NORMAL"],
+            default="LOW",
+        )
 
         # ── Pullback-timing helpers ──────────────────────────────
         # Used in populate_entry_trend to filter out overbought/oversold entries
@@ -331,60 +350,85 @@ class ConfidenceThresholdStrategy(IStrategy):
 
         return dataframe
 
+    # ── Per-pair θ lookup ────────────────────────────────────────
+    def _get_theta_for_pair(self, pair: Optional[str]) -> float:
+        """Return calibrated θ for pair, or global default if not calibrated."""
+        if pair and pair in self._pair_theta:
+            return float(self._pair_theta[pair])
+        return float(self.theta_execute.value)
+
     # ================================================================
     #  SCHICHT 3: EXECUTION ENGINE – ENTRY / EXIT SIGNALS
     # ================================================================
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        dataframe["enter_long"] = 0
-        dataframe["enter_short"] = 0
-        dataframe["enter_tag"] = ""
+        df = dataframe.copy()
+        df["enter_long"] = 0
+        df["enter_short"] = 0
+        df["enter_tag"] = ""
 
-        # Use hyperopt-tunable theta (calibration updates this via bot_start in live)
-        theta = float(self.theta_execute.value)
+        pair = metadata.get("pair")
+        theta = self._get_theta_for_pair(pair)
         adx_min = self.adx_min_entry.value
         vol_min = float(self.vol_confirm_ratio.value)
 
-        # ── Long: UP signal above θ + hard confluence + pullback timing ─
-        # Pullback timing: RSI < 58 and RISING means price pulled back from
-        # overbought levels and is now recovering — entering at a better price
-        # rather than at the peak of a momentum move.
+        # ── Long: UP signal above θ + EMA stacking + microstructure + pullback ─
         long_cond = (
-            (dataframe["signal_direction"] == "UP")
-            & (dataframe["confidence"] >= theta)
-            & (dataframe["close"] > dataframe["ema_200"])
-            & (dataframe["adx"] >= adx_min)
-            & (dataframe["volume_ratio"] >= vol_min)
-            & (dataframe["rsi_14"] < 58)                              # Not overbought
-            & (dataframe["rsi_14"] > dataframe["rsi_prev"])           # RSI recovering
-            & (dataframe["macd_hist"] > dataframe["macd_hist_prev"])  # MACD improving
-            & (~dataframe["date"].dt.hour.isin(self.NO_TRADE_HOURS))
-            & (dataframe["volume"] > 0)
+            (df["signal_direction"] == "UP")
+            & (df["confidence"] >= theta)
+            & (df["close"] > df["ema_200"])
+            # EMA stacking: confirms uptrend alignment across all timeframes
+            & (df["ema_12"] > df["ema_26"])
+            & (df["ema_26"] > df["ema_50"])
+            & (df["adx"] >= adx_min)
+            & (df["volume_ratio"] >= vol_min)
+            # Pullback timing
+            & (df["rsi_14"] < 58)                              # Not overbought
+            & (df["rsi_14"] > df["rsi_prev"])                  # RSI recovering
+            & (df["macd_hist"] > 0)                            # MACD hist positive
+            & (df["macd_hist"] > df["macd_hist_prev"])         # MACD hist improving
+            # Microstructure confirmation
+            & (df["buy_pressure"] > 0.10)
+            & (df["buy_pressure_ma"] > 0.05)
+            & (df["micro_momentum"] > 0.0)
+            & (df["liquidity_score"] > 0.50)
+            & (~df["date"].dt.hour.isin(self.NO_TRADE_HOURS))
+            & (df["volume"] > 0)
         )
-        dataframe.loc[long_cond, "enter_long"] = 1
-        dataframe.loc[long_cond, "enter_tag"] = (
-            "conf_" + (dataframe["confidence"] * 100).round(0).astype(int).astype(str)
+        df.loc[long_cond, "enter_long"] = 1
+        df.loc[long_cond, "enter_tag"] = (
+            "conf_" + (df["confidence"] * 100).round(0).astype(int).astype(str)
         )
 
-        # ── Short: DOWN signal above θ + hard confluence + pullback timing ─
+        # ── Short: DOWN signal above θ + EMA stacking + microstructure + pullback ─
         short_cond = (
-            (dataframe["signal_direction"] == "DOWN")
-            & (dataframe["confidence"] >= theta)
-            & (dataframe["close"] < dataframe["ema_200"])
-            & (dataframe["adx"] >= adx_min)
-            & (dataframe["volume_ratio"] >= vol_min)
-            & (dataframe["rsi_14"] > 42)                              # Not oversold
-            & (dataframe["rsi_14"] < dataframe["rsi_prev"])           # RSI declining
-            & (dataframe["macd_hist"] < dataframe["macd_hist_prev"])  # MACD worsening
-            & (~dataframe["date"].dt.hour.isin(self.NO_TRADE_HOURS))
-            & (dataframe["volume"] > 0)
+            (df["signal_direction"] == "DOWN")
+            & (df["confidence"] >= theta)
+            & (df["close"] < df["ema_200"])
+            # EMA stacking: confirms downtrend alignment
+            & (df["ema_12"] < df["ema_26"])
+            & (df["ema_26"] < df["ema_50"])
+            & (df["adx"] >= adx_min)
+            & (df["volume_ratio"] >= vol_min)
+            # Pullback timing
+            & (df["rsi_14"] > 42)                              # Not oversold
+            & (df["rsi_14"] < df["rsi_prev"])                  # RSI declining
+            & (df["macd_hist"] < 0)                            # MACD hist negative
+            & (df["macd_hist"] < df["macd_hist_prev"])         # MACD hist worsening
+            # Microstructure confirmation
+            & (df["buy_pressure"] < -0.10)
+            & (df["buy_pressure_ma"] < -0.05)
+            & (df["micro_momentum"] < 0.0)
+            & (df["liquidity_score"] > 0.50)
+            & (~df["date"].dt.hour.isin(self.NO_TRADE_HOURS))
+            & (df["volume"] > 0)
         )
-        dataframe.loc[short_cond, "enter_short"] = 1
-        dataframe.loc[short_cond, "enter_tag"] = (
-            "conf_" + (dataframe["confidence"] * 100).round(0).astype(int).astype(str)
+        df.loc[short_cond, "enter_short"] = 1
+        df.loc[short_cond, "enter_tag"] = (
+            "conf_" + (df["confidence"] * 100).round(0).astype(int).astype(str)
         )
 
-        return dataframe
+        return df
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         dataframe["exit_long"] = 0
@@ -436,9 +480,14 @@ class ConfidenceThresholdStrategy(IStrategy):
         # futures is (price_change / open_rate) * leverage
         sl_distance = atr_pct * float(self.atr_stop_mult.value) * leverage
 
-        # Break-even after 1x ATR profit
+        # Two-tier break-even: 2 ATR MUST be checked before 1 ATR (order matters!)
+        # +2 ATR → lock in +0.8% above entry
+        if current_profit >= atr_pct * 2.0 * leverage:
+            return stoploss_from_open(0.008, current_profit, is_short=trade.is_short,
+                                      leverage=leverage)
+        # +1 ATR → break-even + 0.2%
         if current_profit >= atr_pct * leverage:
-            return stoploss_from_open(0.001, current_profit, is_short=trade.is_short,
+            return stoploss_from_open(0.002, current_profit, is_short=trade.is_short,
                                       leverage=leverage)
 
         return -sl_distance
@@ -564,10 +613,9 @@ class ConfidenceThresholdStrategy(IStrategy):
         leverage: float,
         entry_tag: Optional[str],
         side: str,
+        pair: str = "",
         **kwargs,
     ) -> float:
-        current_profit = kwargs.get("current_profit", 0.0)
-        pair = kwargs.get("pair", "")
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
         if dataframe.empty:
             return proposed_stake
@@ -604,39 +652,36 @@ class ConfidenceThresholdStrategy(IStrategy):
 
     def bot_start(self, **kwargs) -> None:
         """
-        Called once at strategy load. Calibrates θ on the most recent
-        500 candles for the first whitelisted pair.
-        Precision target: ≥ 60% over PREDICTION_HORIZON_MIN window.
+        Called once at strategy load. Calibrates θ per-pair on the most recent
+        500 candles. Precision target: ≥ 60% over PREDICTION_HORIZON_MIN window.
         """
         try:
             pairs = self.dp.current_whitelist()
             if not pairs:
                 return
 
-            # Fetch candles (need extra for warm-up + horizon)
             horizon_candles = self.PREDICTION_HORIZON_MIN // self.CANDLE_TF_MIN
-            df = self.dp.get_pair_dataframe(pairs[0], self.timeframe)
-            if df is None or len(df) < 500 + horizon_candles + self.startup_candle_count:
-                return
+            min_candles = 500 + horizon_candles + self.startup_candle_count
 
-            # Compute indicators on the data slice
-            df_calc = df.tail(700 + horizon_candles).copy().reset_index(drop=True)
-            df_calc = self.populate_indicators(df_calc, {"pair": pairs[0]})
-
-            calibrated = self._calibrate_theta(df_calc, window=500)
-            if calibrated is not None:
-                self._calibrated_theta = calibrated
-                # Sync to hyperopt param so populate_entry_trend picks it up in live
+            for pair in pairs:
                 try:
-                    self.theta_execute._value = calibrated
-                except Exception:
-                    pass
-                print(
-                    f"[ConfidenceThreshold] Walk-forward calibration: "
-                    f"θ = {calibrated:.2f}"
-                )
+                    df = self.dp.get_pair_dataframe(pair, self.timeframe)
+                    if df is None or len(df) < min_candles:
+                        continue
+
+                    df_calc = df.tail(700 + horizon_candles).copy().reset_index(drop=True)
+                    df_calc = self.populate_indicators(df_calc, {"pair": pair})
+
+                    calibrated = self._calibrate_theta(df_calc, window=self.CALIB_WINDOW)
+                    if calibrated is not None:
+                        self._pair_theta[pair] = calibrated
+                        print(
+                            f"[ConfidenceThreshold] {pair}: walk-forward θ = {calibrated:.2f}"
+                        )
+                except Exception as pair_exc:
+                    print(f"[ConfidenceThreshold] {pair}: calibration skipped: {pair_exc}")
         except Exception as e:
-            print(f"[ConfidenceThreshold] Calibration skipped: {e}")
+            print(f"[ConfidenceThreshold] bot_start error: {e}")
 
     def _calibrate_theta(
         self, df: DataFrame, window: int = 500
@@ -645,7 +690,8 @@ class ConfidenceThresholdStrategy(IStrategy):
         Walk-forward θ search.
         For each candidate θ, measure directional precision over
         PREDICTION_HORIZON_MIN minutes ahead.
-        Returns θ with precision ≥ 60% and maximum trade count.
+        Returns θ that maximises trade count with precision ≥ 60%.
+        Tie-break: higher precision first, then lower θ (more opportunities).
         """
         horizon = self.PREDICTION_HORIZON_MIN // self.CANDLE_TF_MIN
         deadband = self.deadband_bps.value / 10000.0
@@ -656,8 +702,9 @@ class ConfidenceThresholdStrategy(IStrategy):
         df_sub = df.tail(window + horizon).reset_index(drop=True)
         theta_candidates = [0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90]
 
-        best_theta = float(self.theta_execute.value)
+        best_theta: Optional[float] = None
         best_count = 0
+        best_precision = 0.0
 
         for theta in theta_candidates:
             correct = 0
@@ -690,13 +737,16 @@ class ConfidenceThresholdStrategy(IStrategy):
 
             precision = correct / total
 
-            # Select: max trades with precision ≥ 60%
-            if precision >= 0.60 and total > best_count:
-                best_theta = theta
-                best_count = total
+            if precision >= 0.60:
+                # Primary: max trades; tie-break: higher precision, then lower θ
+                if (total > best_count
+                        or (total == best_count and precision > best_precision)):
+                    best_theta = theta
+                    best_count = total
+                    best_precision = precision
                 print(
                     f"[ConfidenceThreshold] θ={theta:.2f} | "
                     f"Precision={precision:.2%} | Trades={total}"
                 )
 
-        return best_theta
+        return best_theta if best_theta is not None else float(self.theta_execute.value)
